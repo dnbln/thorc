@@ -56,6 +56,8 @@ impl Config {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct RemoteIndex {
     pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
 
     #[serde(flatten)]
     pub repo: RepoDef,

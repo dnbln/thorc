@@ -2,7 +2,9 @@ use std::{fs, path::PathBuf};
 
 use clap::Parser;
 use directories::ProjectDirs;
-use thorc::{check_template_name, Config, GitProvider, RepoDef, Template, TemplateIndex, RO};
+use thorc::{
+    check_template_name, Config, GitProvider, RemoteIndex, RepoDef, Template, TemplateIndex, RO,
+};
 
 #[derive(Parser)]
 struct Opts {
@@ -24,6 +26,8 @@ enum Subcommand {
     List,
     Find(FindCommand),
     New(NewCommand),
+    AddRemoteIndex(AddRemoteIndexCommand),
+    RemoveRemoteIndex(RemoveRemoteIndexCommand),
 }
 
 #[derive(Parser)]
@@ -87,6 +91,29 @@ pub struct NewCommand {
     allow_dirty: bool,
 }
 
+#[derive(Parser)]
+pub struct AddRemoteIndexCommand {
+    #[clap(long, parse(try_from_str), default_value = "github")]
+    git_provider: GitProvider,
+    #[clap(short, long)]
+    user: String,
+    #[clap(long)]
+    repo: String,
+    #[clap(long)]
+    git_ref: String,
+    #[clap(long, parse(from_os_str))]
+    path: PathBuf,
+    #[clap(long)]
+    description: Option<String>,
+
+    name: String,
+}
+
+#[derive(Parser)]
+pub struct RemoveRemoteIndexCommand {
+    name: String,
+}
+
 const NAME: &'static str = env!("CARGO_PKG_NAME");
 const CONFIG_FILE_NAME: &'static str = concat!(env!("CARGO_PKG_NAME"), ".conf");
 
@@ -122,21 +149,53 @@ macro_rules! err {
     };
 }
 
-fn main() {
-    let Opts {
-        config,
-        local_templates_index,
-        subcmd,
-    } = Opts::parse();
-
-    let home_config = config.unwrap_or_else(config_file);
-    let config = fs::read_to_string(home_config).expect("Cannot read config file");
+fn load_config(config: &Option<PathBuf>) -> (PathBuf, Config) {
+    let config_file = config.clone().unwrap_or_else(config_file);
+    let config = fs::read_to_string(&config_file).expect("Cannot read config file");
     let config = toml::from_str::<Config>(&config).expect("Cannot parse config file");
 
-    let local_index_file = local_templates_index.unwrap_or_else(local_index_file);
+    (config_file, config)
+}
+
+fn edit_config<F>(config: &Option<PathBuf>, f: F)
+where
+    F: FnOnce(Config) -> Config,
+{
+    let (config_file, config) = load_config(config);
+    let config = f(config);
+
+    let config_str = toml::to_string_pretty(&config).expect("Couldn't serialize local index");
+    std::fs::write(&config_file, &config_str).expect("Couldn't write local index");
+}
+
+fn load_local_index(local_templates_index: &Option<PathBuf>) -> (PathBuf, TemplateIndex) {
+    let local_index_file = local_templates_index
+        .clone()
+        .unwrap_or_else(local_index_file);
     let local_index = fs::read_to_string(&local_index_file).expect("Cannot read local index file");
     let local_index =
         toml::from_str::<TemplateIndex>(&local_index).expect("Cannot parse local index file");
+
+    (local_index_file, local_index)
+}
+
+fn edit_index<F>(local_templates_index: &Option<PathBuf>, f: F)
+where
+    F: FnOnce(TemplateIndex) -> TemplateIndex,
+{
+    let (local_index_file, local_index) = load_local_index(local_templates_index);
+    let local_index = f(local_index);
+
+    let index_str = toml::to_string_pretty(&local_index).expect("Couldn't serialize local index");
+    std::fs::write(&local_index_file, &index_str).expect("Couldn't write local index");
+}
+
+fn main() {
+    let Opts {
+        ref config,
+        ref local_templates_index,
+        subcmd,
+    } = Opts::parse();
 
     let cache = cache_dir();
 
@@ -149,7 +208,7 @@ fn main() {
             issue,
             name,
             description,
-        }) => {
+        }) => edit_index(local_templates_index, |mut local_index| {
             if let Some(t) = local_index.templates.iter().find(|it| it.name() == name) {
                 err!("Template already exists in index, pointing to {:?}", t);
             }
@@ -170,19 +229,15 @@ fn main() {
                 issue,
             };
 
-            let mut local_index = local_index;
             local_index.templates.insert(t);
 
-            let index_str =
-                toml::to_string_pretty(&local_index).expect("Couldn't serialize local index");
-
-            std::fs::write(&local_index_file, &index_str).expect("Couldn't write local index");
-        }
+            local_index
+        }),
         Subcommand::AddLocalToIndex(AddLocalToIndexCommand {
             path,
             description,
             name,
-        }) => {
+        }) => edit_index(local_templates_index, |mut local_index| {
             if local_index.for_remote {
                 err!("Local templates may not be added to indexes intended to be used remotely");
             }
@@ -201,35 +256,34 @@ fn main() {
                 path,
             };
 
-            let mut local_index = local_index;
             local_index.templates.insert(t);
 
-            let index_str =
-                toml::to_string_pretty(&local_index).expect("Couldn't serialize local index");
-
-            std::fs::write(&local_index_file, &index_str).expect("Couldn't write local index");
-        }
+            local_index
+        }),
         Subcommand::RemoveFromIndex(RemoveFromIndexCommand { name }) => {
-            if let Err(err) = check_template_name(&name) {
-                err!("Invalid name: {}", err);
-            }
+            edit_index(local_templates_index, |mut local_index| {
+                if let Err(err) = check_template_name(&name) {
+                    err!("Invalid name: {}", err);
+                }
 
-            let mut local_index = local_index;
-            if !local_index.templates.remove(name.as_str()) {
-                err!("Template {} doesn't exists in index", name);
-            }
+                if !local_index.templates.remove(name.as_str()) {
+                    err!("Template {} doesn't exists in index", name);
+                }
 
-            let index_str =
-                toml::to_string_pretty(&local_index).expect("Couldn't serialize local index");
-
-            std::fs::write(&local_index_file, &index_str).expect("Couldn't write local index");
+                local_index
+            })
         }
         Subcommand::List => {
+            let (_, local_index) = load_local_index(local_templates_index);
+
             for template in local_index.templates.iter() {
                 println!("{}", template.one_line_summary());
             }
         }
         Subcommand::Find(FindCommand { term }) => {
+            let (_, local_index) = load_local_index(local_templates_index);
+            let (_, config) = load_config(config);
+
             let first_result = local_index.find(&term);
             let mut result = first_result.compose("<local>");
 
@@ -280,6 +334,9 @@ fn main() {
             directory,
             allow_dirty,
         }) => {
+            let (_, local_index) = load_local_index(local_templates_index);
+            let (_, config) = load_config(config);
+
             if let Err(err) = check_template_name(&template_name) {
                 err!("Invalid name: {}", err);
             }
@@ -291,10 +348,7 @@ fn main() {
                         directory.display()
                     );
                 } else if !allow_dirty && directory.read_dir().unwrap().next().is_some() {
-                    err!(
-                        "{} already exists and is not empty",
-                        directory.display()
-                    );
+                    err!("{} already exists and is not empty", directory.display());
                 }
             }
 
@@ -331,6 +385,54 @@ fn main() {
             fs::create_dir_all(&directory).expect("Cannot create directory");
 
             thorc::copy(&template_path, &directory).expect("Cannot copy template");
+        }
+        Subcommand::AddRemoteIndex(AddRemoteIndexCommand {
+            name,
+            description,
+            git_provider,
+            user,
+            repo,
+            git_ref,
+            path,
+        }) => edit_config(config, |mut config| {
+            if name == "local" {
+                err!("Cannot add a remote index named 'local'");
+            }
+
+            let remote_index = RemoteIndex {
+                name,
+                description,
+                path,
+                repo: RepoDef {
+                    git_provider,
+                    user,
+                    repo,
+                    git_ref,
+                },
+            };
+
+            config.remote_indexes.push(remote_index);
+
+            config
+        }),
+        Subcommand::RemoveRemoteIndex(RemoveRemoteIndexCommand { name }) => {
+            edit_config(config, |mut config| {
+                if name == "local" {
+                    err!("Cannot remove index named 'local'");
+                }
+
+                let remote_index = config
+                    .remote_indexes
+                    .iter()
+                    .enumerate()
+                    .find(|(_, index)| index.name == name)
+                    .unwrap_or_else(|| err!("No remote called '{}' found", name))
+                    .0;
+
+                config.remote_indexes.remove(remote_index);
+
+                config
+            })
         }
     }
 }
