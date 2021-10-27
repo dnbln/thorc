@@ -1,0 +1,21 @@
+[package]
+name = "thorc"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "3.0.0-beta.5"
+directories = "4.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.5"
+thiserror = "1"
+reqwest = { version = "0.11", default-features = false, features = [
+    "rustls-tls",
+    "blocking",
+] }
+tar = "0.4"
+flate2 = "1"
+bytes = "1"
+sha = "1.0.3"
