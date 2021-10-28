@@ -1,4 +1,13 @@
-use std::{borrow::Borrow, collections::BTreeSet, fs, io::{self, Write}, ops::Deref, path::{Path, PathBuf}, str::FromStr, time::{Duration, SystemTime}};
+use std::{
+    borrow::Borrow,
+    collections::BTreeSet,
+    fs,
+    io::{self, Write},
+    ops::Deref,
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::{Duration, SystemTime},
+};
 
 use flate2::read::GzDecoder;
 use reqwest::{header, StatusCode};
@@ -364,6 +373,10 @@ pub enum Template {
         /// issue the template was added from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         issue: Option<usize>,
+
+        /// setup kind
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        setup: Option<SetupKind>,
     },
     Local {
         name: String,
@@ -432,6 +445,7 @@ impl Template {
                 description,
                 repo,
                 issue,
+                ..
             } => {
                 let issue_text = issue.map(|it| format!("for issue {}", it));
                 let desc_text = description.as_ref();
@@ -457,6 +471,13 @@ impl Template {
             }
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum SetupKind {
+    Rust,
+    Npm,
 }
 
 fn hash_buffer(buf: &[u8]) -> String {

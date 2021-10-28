@@ -1,4 +1,11 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fmt::Write,
+    fs,
+    io::{self, BufRead, Write as IoWrite},
+    path::{Components, Path, PathBuf},
+    process::{Command, ExitStatus, Stdio},
+    str::FromStr,
+};
 
 use clap::Parser;
 use directories::ProjectDirs;
@@ -28,6 +35,10 @@ enum Subcommand {
     New(NewCommand),
     AddRemoteIndex(AddRemoteIndexCommand),
     RemoveRemoteIndex(RemoveRemoteIndexCommand),
+
+    // utils
+    EditToml(EditTomlCommand),
+    EditJson(EditJsonCommand),
 }
 
 #[derive(Parser)]
@@ -86,6 +97,8 @@ pub struct NewCommand {
     #[clap(short, long, parse(from_str))]
     index: Option<IndexName>,
     template_name: String,
+    #[clap(long)]
+    project_name: Option<String>,
     directory: PathBuf,
     #[clap(long)]
     allow_dirty: bool,
@@ -112,6 +125,30 @@ pub struct AddRemoteIndexCommand {
 #[derive(Parser)]
 pub struct RemoveRemoteIndexCommand {
     name: String,
+}
+
+#[derive(Parser)]
+pub struct EditTomlCommand {
+    toml_file: PathBuf,
+    objcet_path: ObjectPath,
+}
+
+#[derive(Parser)]
+pub struct EditJsonCommand {
+    json_file: PathBuf,
+    objcet_path: ObjectPath,
+}
+
+pub struct ObjectPath {
+    pb: PathBuf,
+}
+
+impl FromStr for ObjectPath {
+    type Err = <PathBuf as FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(|pb| Self { pb })
+    }
 }
 
 const NAME: &'static str = env!("CARGO_PKG_NAME");
@@ -142,9 +179,7 @@ fn local_index_file() -> PathBuf {
 macro_rules! err {
     ($($args:tt)*) => {
         {
-            eprintln!($($args)*);
-
-            std::process::exit(1)
+            panic!($($args)*)
         }
     };
 }
@@ -165,7 +200,7 @@ where
     let config = f(config);
 
     let config_str = toml::to_string_pretty(&config).expect("Couldn't serialize local index");
-    std::fs::write(&config_file, &config_str).expect("Couldn't write local index");
+    fs::write(&config_file, &config_str).expect("Couldn't write local index");
 }
 
 fn load_local_index(local_templates_index: &Option<PathBuf>) -> (PathBuf, TemplateIndex) {
@@ -187,7 +222,11 @@ where
     let local_index = f(local_index);
 
     let index_str = toml::to_string_pretty(&local_index).expect("Couldn't serialize local index");
-    std::fs::write(&local_index_file, &index_str).expect("Couldn't write local index");
+    fs::write(&local_index_file, &index_str).expect("Couldn't write local index");
+}
+
+fn self_bin_path() -> PathBuf {
+    std::env::current_exe().expect("Cannot get self binary")
 }
 
 fn main() {
@@ -196,6 +235,10 @@ fn main() {
         ref local_templates_index,
         subcmd,
     } = Opts::parse();
+
+    tracing_subscriber::fmt::SubscriberBuilder::default()
+        .pretty()
+        .init();
 
     let cache = cache_dir();
 
@@ -227,6 +270,7 @@ fn main() {
                     git_ref,
                 },
                 issue,
+                setup: None,
             };
 
             local_index.templates.insert(t);
@@ -331,6 +375,7 @@ fn main() {
         Subcommand::New(NewCommand {
             index,
             template_name,
+            project_name,
             directory,
             allow_dirty,
         }) => {
@@ -385,6 +430,17 @@ fn main() {
             fs::create_dir_all(&directory).expect("Cannot create directory");
 
             thorc::copy(&template_path, &directory).expect("Cannot copy template");
+
+            finish_setup(
+                &self_bin_path(),
+                &template,
+                &directory,
+                project_name
+                    .as_ref()
+                    .map(|it| it.as_str())
+                    .unwrap_or_else(|| directory.file_name().unwrap().to_str().unwrap()),
+            )
+            .expect("Cannot finish setup");
         }
         Subcommand::AddRemoteIndex(AddRemoteIndexCommand {
             name,
@@ -434,7 +490,243 @@ fn main() {
                 config
             })
         }
+        Subcommand::EditToml(EditTomlCommand {
+            toml_file,
+            objcet_path,
+        }) => {
+            let stdin = io::stdin();
+            let mut input_str = String::new();
+
+            for line in stdin.lock().lines() {
+                writeln!(&mut input_str, "{}", line.unwrap()).unwrap();
+            }
+
+            let input = toml::from_str::<toml::Value>(&input_str).expect("Failed to parse input");
+            let mut toml_file_value =
+                toml::from_str::<toml::Value>(&fs::read_to_string(&toml_file).unwrap()).unwrap();
+
+            patch_toml(
+                &mut toml_file_value,
+                input,
+                &mut objcet_path.pb.components(),
+            );
+
+            let toml_file_str = toml::to_string_pretty(&toml_file_value).unwrap();
+            fs::write(&toml_file, toml_file_str).unwrap();
+        }
+        Subcommand::EditJson(EditJsonCommand {
+            json_file,
+            objcet_path,
+        }) => {
+            let stdin = io::stdin();
+            let mut input_str = String::new();
+
+            for line in stdin.lock().lines() {
+                writeln!(&mut input_str, "{}", line.unwrap()).unwrap();
+            }
+
+            let input = serde_json::from_str::<serde_json::Value>(&input_str)
+                .expect("Failed to parse input");
+            let mut json_file_value =
+                serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&json_file).unwrap())
+                    .unwrap();
+
+            patch_json(
+                &mut json_file_value,
+                input,
+                &mut objcet_path.pb.components(),
+            );
+
+            let json_file_str = serde_json::to_string_pretty(&json_file_value).unwrap();
+            fs::write(&json_file, json_file_str).unwrap();
+        }
     }
+}
+
+fn patch_toml(original_value: &mut toml::Value, new_value: toml::Value, path: &mut Components) {
+    let next = path.next();
+
+    match next {
+        Some(c) => {
+            let c = c.as_os_str().to_str().unwrap();
+
+            if let Ok(int) = usize::from_str(c) {
+                patch_toml(
+                    &mut original_value.as_array_mut().unwrap()[int],
+                    new_value,
+                    path,
+                );
+            } else {
+                patch_toml(
+                    &mut original_value.as_table_mut().unwrap()[c],
+                    new_value,
+                    path,
+                );
+            }
+        }
+        None => {
+            *original_value = new_value;
+        }
+    }
+}
+
+fn patch_json(
+    original_value: &mut serde_json::Value,
+    new_value: serde_json::Value,
+    path: &mut Components,
+) {
+    let next = path.next();
+
+    match next {
+        Some(c) => {
+            let c = c.as_os_str().to_str().unwrap();
+
+            if let Ok(int) = usize::from_str(c) {
+                patch_json(
+                    &mut original_value.as_array_mut().unwrap()[int],
+                    new_value,
+                    path,
+                );
+            } else {
+                patch_json(
+                    &mut original_value.as_object_mut().unwrap()[c],
+                    new_value,
+                    path,
+                );
+            }
+        }
+        None => {
+            *original_value = new_value;
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunHookError {
+    #[error("IO error: {0}")]
+    IO(#[from] io::Error),
+    #[error("status not success: {0}")]
+    StatusNotSuccess(ExitStatus),
+}
+
+fn hook_path(dir: &Path, name: &str) -> PathBuf {
+    let mut pb = dir.join("thor");
+    pb.push(name);
+    pb
+}
+
+fn hook_exists(dir: &Path, name: &str) -> bool {
+    hook_path(dir, name).exists()
+}
+
+fn run_hook<F>(
+    self_bin: &Path,
+    directory: &Path,
+    hook_name: &str,
+    args: F,
+) -> Result<(), RunHookError>
+where
+    F: for<'a> FnOnce(&'a mut Command) -> &'a mut Command,
+{
+    let hook = hook_path(directory, hook_name);
+
+    if hook.exists() {
+        if hook.is_file() {
+            let mut cmd = std::process::Command::new(&hook);
+            args(&mut cmd);
+            cmd.env("THORC", self_bin);
+
+            tracing::debug!("Running: {:?}", cmd);
+
+            let mut child = cmd.spawn()?;
+            let exit = child.wait()?;
+
+            if !exit.success() {
+                return Err(RunHookError::StatusNotSuccess(exit));
+            }
+        } else {
+            tracing::warn!("Looks like {} is not a file", hook.display());
+        }
+    } else {
+        tracing::info!("Looks like {} doesn't exist, not running", hook.display());
+    }
+
+    Ok(())
+}
+
+fn finish_setup(
+    self_bin: &Path,
+    template: &Template,
+    directory: &Path,
+    project_name: &str,
+) -> Result<(), RunHookError> {
+    const SETUP_HOOK_NAME: &'static str = "setup";
+
+    if hook_exists(directory, SETUP_HOOK_NAME) {
+        run_hook(self_bin, directory, SETUP_HOOK_NAME, |command| {
+            command.arg(directory).arg(project_name)
+        })
+    } else {
+        if let Template::Repo {
+            setup: Some(setup_kind),
+            ..
+        } = template
+        {
+            match setup_kind {
+                thorc::SetupKind::Rust => run_sh(
+                    r#"#!/usr/bin/env bash
+                        dir="$1"
+                        name="$2"
+    
+                        echo "\"$name\"" | $THORC edit-toml "$dir/Cargo.toml" "package/name"
+                        "#,
+                    |cmd| cmd.arg(directory).arg(project_name),
+                ),
+                thorc::SetupKind::Npm => run_sh(
+                    r#"#!/usr/bin/env bash
+                    dir="$1"
+                    name="$2"
+
+                    echo "Setting up for npm" >&2
+                    echo "\"$name\"" | $THORC edit-json "$dir/package.json" "name" || exit $?
+                    "#,
+                    |cmd| cmd.arg(directory).arg(project_name),
+                ),
+            }
+        } else {
+            tracing::warn!(
+                "No setup hook found for {}; you may need to change some things manually",
+                template.name()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn run_sh<F>(sh: &str, args: F) -> Result<(), RunHookError>
+where
+    F: FnOnce(&mut Command) -> &mut Command,
+{
+    let mut cmd = std::process::Command::new("/usr/bin/env");
+    cmd.stdin(Stdio::piped()).arg("bash").arg("-s").arg("-");
+    args(&mut cmd);
+    cmd.env("THORC", self_bin_path());
+
+    dbg!(&cmd);
+
+    tracing::debug!("Running: {:?}", cmd);
+
+    let mut child = cmd.spawn()?;
+
+    write!(&mut child.stdin.as_ref().unwrap(), "{}", sh)?;
+
+    let exit = child.wait()?;
+
+    if !exit.success() {
+        return Err(RunHookError::StatusNotSuccess(exit));
+    }
+
+    Ok(())
 }
 
 fn find_template<'a>(indexes: &'a [TemplateIndex], name: &str) -> Option<&'a Template> {
