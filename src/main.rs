@@ -501,7 +501,11 @@ fn main() {
                 writeln!(&mut input_str, "{}", line.unwrap()).unwrap();
             }
 
-            let input = toml::from_str::<toml::Value>(&input_str).expect("Failed to parse input");
+            let mut input = toml::from_str::<toml::Value>(&input_str).expect("Failed to parse input");
+            let input = std::mem::replace(
+                &mut input.as_table_mut().unwrap()["value"],
+                toml::Value::Integer(0),
+            );
             let mut toml_file_value =
                 toml::from_str::<toml::Value>(&fs::read_to_string(&toml_file).unwrap()).unwrap();
 
@@ -678,7 +682,7 @@ fn finish_setup(
                         dir="$1"
                         name="$2"
     
-                        echo "\"$name\"" | $THORC edit-toml "$dir/Cargo.toml" "package/name"
+                        echo "value = \"$name\"" | $THORC edit-toml "$dir/Cargo.toml" "package/name"
                         "#,
                     |cmd| cmd.arg(directory).arg(project_name),
                 ),
@@ -711,8 +715,6 @@ where
     cmd.stdin(Stdio::piped()).arg("bash").arg("-s").arg("-");
     args(&mut cmd);
     cmd.env("THORC", self_bin_path());
-
-    dbg!(&cmd);
 
     tracing::debug!("Running: {:?}", cmd);
 
