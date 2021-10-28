@@ -501,21 +501,22 @@ fn main() {
                 writeln!(&mut input_str, "{}", line.unwrap()).unwrap();
             }
 
-            let mut input = toml::from_str::<toml::Value>(&input_str).expect("Failed to parse input");
-            let input = std::mem::replace(
-                &mut input.as_table_mut().unwrap()["value"],
-                toml::Value::Integer(0),
-            );
-            let mut toml_file_value =
-                toml::from_str::<toml::Value>(&fs::read_to_string(&toml_file).unwrap()).unwrap();
+            let mut input = input_str
+                .parse::<toml_edit::Document>()
+                .expect("Failed to parse input");
+            let input = std::mem::replace(&mut input["value"], toml_edit::Item::None);
+            let mut toml_file_value = fs::read_to_string(&toml_file)
+                .unwrap()
+                .parse::<toml_edit::Document>()
+                .unwrap();
 
             patch_toml(
-                &mut toml_file_value,
+                &mut toml_file_value.root,
                 input,
                 &mut objcet_path.pb.components(),
             );
 
-            let toml_file_str = toml::to_string_pretty(&toml_file_value).unwrap();
+            let toml_file_str = toml_file_value.to_string();
             fs::write(&toml_file, toml_file_str).unwrap();
         }
         Subcommand::EditJson(EditJsonCommand {
@@ -547,7 +548,11 @@ fn main() {
     }
 }
 
-fn patch_toml(original_value: &mut toml::Value, new_value: toml::Value, path: &mut Components) {
+fn patch_toml(
+    original_value: &mut toml_edit::Item,
+    new_value: toml_edit::Item,
+    path: &mut Components,
+) {
     let next = path.next();
 
     match next {
@@ -555,17 +560,9 @@ fn patch_toml(original_value: &mut toml::Value, new_value: toml::Value, path: &m
             let c = c.as_os_str().to_str().unwrap();
 
             if let Ok(int) = usize::from_str(c) {
-                patch_toml(
-                    &mut original_value.as_array_mut().unwrap()[int],
-                    new_value,
-                    path,
-                );
+                patch_toml(&mut original_value[int], new_value, path);
             } else {
-                patch_toml(
-                    &mut original_value.as_table_mut().unwrap()[c],
-                    new_value,
-                    path,
-                );
+                patch_toml(&mut original_value[c], new_value, path);
             }
         }
         None => {
@@ -682,7 +679,8 @@ fn finish_setup(
                         dir="$1"
                         name="$2"
     
-                        echo "value = \"$name\"" | $THORC edit-toml "$dir/Cargo.toml" "package/name"
+                        echo "Setting up for rust" >&2
+                        echo "value = \"$name\"" | $THORC edit-toml "$dir/Cargo.toml" "package/name" || exit $?
                         "#,
                     |cmd| cmd.arg(directory).arg(project_name),
                 ),
