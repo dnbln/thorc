@@ -10,7 +10,13 @@ use std::{
 use clap::Parser;
 use directories::ProjectDirs;
 use thorc::{
-    check_template_name, Config, GitProvider, RemoteIndex, RepoDef, Template, TemplateIndex, RO,
+    config::Config,
+    index::TemplateIndex,
+    remote_index::RemoteIndex,
+    repo_def::{GitProvider, RepoDef},
+    ro::RO,
+    template::check_template_name,
+    template::{SetupKind, Template},
 };
 
 #[derive(Parser)]
@@ -429,7 +435,7 @@ fn main() {
 
             fs::create_dir_all(&directory).expect("Cannot create directory");
 
-            thorc::copy(&template_path, &directory).expect("Cannot copy template");
+            thorc::utils::copy(&template_path, &directory).expect("Cannot copy template");
 
             finish_setup(
                 &self_bin_path(),
@@ -674,7 +680,7 @@ fn finish_setup(
         } = template
         {
             match setup_kind {
-                thorc::SetupKind::Rust => run_sh(
+                SetupKind::Rust => run_sh(
                     r#"#!/usr/bin/env bash
                         dir="$1"
                         name="$2"
@@ -684,7 +690,7 @@ fn finish_setup(
                         "#,
                     |cmd| cmd.arg(directory).arg(project_name),
                 ),
-                thorc::SetupKind::Npm => run_sh(
+                SetupKind::Npm => run_sh(
                     r#"#!/usr/bin/env bash
                     dir="$1"
                     name="$2"
